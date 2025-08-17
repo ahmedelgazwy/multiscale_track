@@ -1,0 +1,1 @@
+[train: 1, 50 / 7500] FPS: 8.4 (8.8)  ,  0frame_Loss/total: 98.08112  ,  0frame_Loss/giou: 1.15573  ,  0frame_Loss/l1: 0.28209  ,  0frame_Loss/location: 94.35921  ,  0frame_IoU: 0.06823  ,  1frame_Loss/total: 100.10426  ,  1frame_Loss/giou: 1.13397  ,  1frame_Loss/l1: 0.27222  ,  1frame_Loss/location: 96.47523  ,  1frame_IoU: 0.07371

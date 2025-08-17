@@ -3,7 +3,8 @@ import torch
 import torch.nn.functional as F
 from typing import Tuple
 from lib.models.layers.frozen_bn import FrozenBatchNorm2d
-
+from torch.amp import autocast
+from torch.amp import GradScaler
 
 # From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
 # Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
@@ -147,7 +148,8 @@ class CenterPredictor(nn.Module, ):
 
     def forward(self, x, gt_score_map=None):
         """ Forward pass with input x. x.shape:(B, C, H, W) """
-        score_map_ctr, size_map, offset_map = self.get_score_map(x)
+        with autocast(device_type="cuda", enabled=False):
+            score_map_ctr, size_map, offset_map = self.get_score_map(x)
 
         # assert gt_score_map is None
         if gt_score_map is None:
