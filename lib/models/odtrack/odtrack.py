@@ -1,7 +1,7 @@
 import math
 import os
 from typing import List
-
+import collections
 import torch
 from torch import nn
 from torch.nn.modules.transformer import _get_clones
@@ -9,13 +9,17 @@ from torch.nn.modules.transformer import _get_clones
 from lib.models.layers.head import build_box_head
 from lib.models.odtrack.vit import vit_base_patch16_224, vit_large_patch16_224
 from lib.models.odtrack.vit_ce import vit_large_patch16_224_ce, vit_base_patch16_224_ce
-from lib.utils.box_ops import box_xyxy_to_cxcywh
-
+from lib.utils.box_ops import box_xyxy_to_cxcywh, box_xywh_to_cxcywh
+# MODIFICATION START
+from .motion_head import StateSpaceHead, create_gaussian_attention_bias
+# MODIFICATION END
 
 class ODTrack(nn.Module):
     """ This is the base class for MMTrack """
 
-    def __init__(self, transformer, box_head, aux_loss=False, head_type="CORNER", token_len=1):
+    def __init__(self, transformer, box_head, aux_loss=False, head_type="CORNER", token_len=1,motion_head_enable=False, motion_head_hidden_dim=128,
+                 # MODIFICATION START
+                 motion_history_len=3):
         """ Initializes the model.
         Parameters:
             transformer: torch module of the transformer architecture.
@@ -38,19 +42,65 @@ class ODTrack(nn.Module):
         self.track_query = None
         self.token_len = token_len
 
+        # MODIFICATION START
+        self.motion_head_enable = motion_head_enable
+        if self.motion_head_enable:
+            self.history_len = motion_history_len
+            self.motion_head = StateSpaceHead(history_len=self.history_len,hidden_dim=motion_head_hidden_dim)
+            # We need to store the previous box to feed to the motion model
+            self.history_boxes_cxcywh = collections.deque(maxlen=self.history_len)
+
+    def reset_motion_history(self):
+            """ Resets the motion model's history. Should be called at the start of each new video sequence. """
+            if self.motion_head_enable:
+                self.history_boxes_cxcywh.clear()
+     
+        # MODIFICATION END
+
     def forward(self, template: torch.Tensor,
                 search: torch.Tensor,
+                gt_bboxes_xywh: List[torch.Tensor] = None,
                 ce_template_mask=None,
                 ce_keep_rate=None,
                 return_last_attn=False,
                 ):
         assert isinstance(search, list), "The type of search is not List"
-
+        if self.training:
+             # During training, we process one sequence clip at a time, so reset every time.
+            self.reset_motion_history()
         out_dict = []
         for i in range(len(search)):
+            # MODIFICATION START - Motion Prediction
+            attention_bias = None
+            motion_pred_delta = None
+            motion_pred_log_sigma = None
+            
+            if self.motion_head_enable and len(self.history_boxes_cxcywh) >0:
+                # 1. Predict motion delta and uncertainty
+                current_history = list(self.history_boxes_cxcywh)
+                if len(current_history) < self.history_len:
+                    # Repeat the oldest available box (the first one) to pad.
+                    num_padding = self.history_len - len(current_history)
+                    padding = [current_history[0]] * num_padding
+                    padded_history = padding + current_history
+                else:
+                    padded_history = current_history
+                history_tensor = torch.stack(padded_history, dim=1) # (B, H_len, 4)
+                history_flat = history_tensor.flatten(start_dim=1) # (B, H_len * 4)
+                motion_pred_delta, motion_pred_log_sigma = self.motion_head(history_flat)
+                last_box = self.history_boxes_cxcywh[-1]
+                # 2. Predict next box center
+                predicted_box_cxcywh = last_box+ motion_pred_delta
+                predicted_center_xy = predicted_box_cxcywh[:, :2] # Normalized (cx, cy)
+                
+                # 3. Create attention bias map
+                attention_bias = create_gaussian_attention_bias(
+                    predicted_center_xy, self.feat_sz_s, search[i].device
+                )
+            # MODIFICATION END
             x, aux_dict = self.backbone(z=template.copy(), x=search[i],
                                         ce_template_mask=ce_template_mask, ce_keep_rate=ce_keep_rate,
-                                        return_last_attn=return_last_attn, track_query=self.track_query, token_len=self.token_len)
+                                        return_last_attn=return_last_attn, track_query=self.track_query, token_len=self.token_len,attention_bias=attention_bias)
             feat_last = x
             if isinstance(x, list):
                 feat_last = x[-1]
@@ -64,6 +114,23 @@ class ODTrack(nn.Module):
             
             # Forward head
             out = self.forward_head(opt, None)
+
+            # MODIFICATION START - Update history and add motion predictions to output
+            if self.training:
+                # Use ground truth to update history for teacher-forcing
+                current_gt_box_xywh = gt_bboxes_xywh[i]
+                current_box_cxcywh = box_xywh_to_cxcywh(current_gt_box_xywh.clone())
+                #self.history_box_cxcywh = box_xywh_to_cxcywh(current_gt_box_xywh.clone())
+            else:
+                # During inference, use the model's own prediction
+                current_box_cxcywh = out['pred_boxes'].view(-1, 4).detach()
+                #self.history_box_cxcywh = out['pred_boxes'].view(-1, 4).detach()
+            if self.motion_head_enable:
+                self.history_boxes_cxcywh.append(current_box_cxcywh)
+            if motion_pred_delta is not None:
+                out['motion_pred_delta'] = motion_pred_delta
+                out['motion_pred_log_sigma'] = motion_pred_log_sigma
+            # MODIFICATION END
 
             out.update(aux_dict)
             out['backbone_feat'] = x
@@ -156,6 +223,9 @@ def build_odtrack(cfg, training=True):
         aux_loss=False,
         head_type=cfg.MODEL.HEAD.TYPE,
         token_len=cfg.MODEL.BACKBONE.TOKEN_LEN,
+        motion_head_enable=cfg.MODEL.MOTION.ENABLE,
+        motion_head_hidden_dim=cfg.MODEL.MOTION.HEAD_HIDDEN_DIM,
+        motion_history_len=cfg.MODEL.MOTION.HISTORY_LEN,
     )
 
     return model

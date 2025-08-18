@@ -49,13 +49,25 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.attn_type = attn_type
 
-    def forward(self, x, lens_z, lens_x, return_attention=False):
+    def forward(self, x, lens_z, lens_x, return_attention=False,attention_bias=None):
         if self.attn_type == 'concat':
             B, N, C = x.shape
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
             attn = (q @ k.transpose(-2, -1)) * self.scale
+                        # MODIFICATION START - ADD BIAS BEFORE SOFTMAX
+            if attention_bias is not None:
+                # The attention bias map is for the search region tokens, which are the last `lens_x` tokens.
+                # We add the bias to the part of the attention matrix corresponding to search region keys.
+                # Shape of attn: (B, num_heads, N_q, N_k)
+                # Shape of attention_bias: (B, lens_x)
+                # We want to add it to attn[:, :, :, -lens_x:]
+                # Unsqueeze to broadcast across heads and query tokens.
+                bias = attention_bias.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, lens_x)
+                attn[:, :, :, -lens_x:] = attn[:, :, :, -lens_x:] + bias
+            # MODIFICATION END
+            
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
 
@@ -114,14 +126,14 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, lens_z, lens_x, return_attention=False):
+    def forward(self, x, lens_z, lens_x, return_attention=False, attention_bias=None):
         if return_attention:
-            feat, attn = self.attn(self.norm1(x), lens_z, lens_x, True)
+            feat, attn = self.attn(self.norm1(x), lens_z, lens_x, True, attention_bias=attention_bias)
             x = x + self.drop_path(feat)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x, attn
         else:
-            x = x + self.drop_path(self.attn(self.norm1(x), lens_z, lens_x))
+            x = x + self.drop_path(self.attn(self.norm1(x), lens_z, lens_x, attention_bias=attention_bias))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
 

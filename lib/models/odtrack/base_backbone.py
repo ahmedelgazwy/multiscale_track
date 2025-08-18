@@ -106,7 +106,7 @@ class BaseBackbone(nn.Module):
                     layer_name = f'norm{i_layer}'
                     self.add_module(layer_name, layer)
 
-    def forward_features(self, z, x, track_query=None, token_type="add"):
+    def forward_features(self, z, x, track_query=None, token_type="add",attention_bias=None):
         B, H, W = x.shape[0], x.shape[2], x.shape[3]
 
         x = self.patch_embed(x)
@@ -146,7 +146,7 @@ class BaseBackbone(nn.Module):
         x = self.pos_drop(x)
 
         for i, blk in enumerate(self.blocks):
-            x, attn = blk(x, lens_z, lens_x, return_attention=True)
+            x, attn = blk(x, lens_z, lens_x, return_attention=True,attention_bias=attention_bias)
         
         new_lens_z = z.shape[1]  # HW
         new_lens_x = x.shape[1]  # HW

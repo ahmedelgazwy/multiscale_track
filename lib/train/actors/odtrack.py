@@ -5,6 +5,8 @@ import torch
 from lib.utils.merge import merge_template_search
 from ...utils.heapmap_utils import generate_heatmap
 from ...utils.ce_utils import generate_mask_cond, adjust_keep_rate
+from lib.models.odtrack.motion_head import gaussian_nll_loss # MODIFICATION
+from lib.utils.box_ops import box_xywh_to_cxcywh # MODIFICATION
 
 
 class ODTrackActor(BaseActor):
@@ -68,6 +70,7 @@ class ODTrackActor(BaseActor):
 
         out_dict = self.net(template=template_list,
                             search=search_list,
+                            gt_bboxes_xywh=data['search_anno'],
                             ce_template_mask=box_mask_z,
                             ce_keep_rate=ce_keep_rate,
                             return_last_attn=False)
@@ -83,7 +86,10 @@ class ODTrackActor(BaseActor):
         
         # generate gt gaussian map
         gt_gaussian_maps_list = generate_heatmap(gt_dict['search_anno'], self.cfg.DATA.SEARCH.SIZE, self.cfg.MODEL.BACKBONE.STRIDE)
-        
+        # MODIFICATION START - Get history of GT boxes for motion loss
+        # Convert all gt boxes to cxcywh format once
+        gt_boxes_cxcywh = [box_xywh_to_cxcywh(anno) for anno in gt_dict['search_anno']]
+        # MODIFICATION END
         for i in range(len(pred_dict)):
             # get GT
             gt_bbox = gt_dict['search_anno'][i]  # (Ns, batch, 4) (x1,y1,w,h) -> (batch, 4)
@@ -115,7 +121,20 @@ class ODTrackActor(BaseActor):
             else:
                 location_loss = torch.tensor(0.0, device=l1_loss.device)
             loss_dict['focal'] = location_loss
-                
+
+            # MODIFICATION START - Compute motion loss
+            motion_loss = torch.tensor(0.0, device=l1_loss.device)
+            if 'motion_pred_delta' in pred_dict[i]:
+                # We can only compute loss from the second frame onwards
+                if i > 0:
+                    # GT delta is current_gt - previous_gt
+                    gt_delta = gt_boxes_cxcywh[i] - gt_boxes_cxcywh[i-1]
+                    pred_delta = pred_dict[i]['motion_pred_delta']
+                    pred_log_sigma = pred_dict[i]['motion_pred_log_sigma']
+                    motion_loss = gaussian_nll_loss(gt_delta, pred_delta, pred_log_sigma)
+            
+            loss_dict['motion'] = motion_loss
+            # MODIFICATION END    
             # weighted sum
             loss = sum(loss_dict[k] * self.loss_weight[k] for k in loss_dict.keys() if k in self.loss_weight)
             total_loss += loss
@@ -129,6 +148,7 @@ class ODTrackActor(BaseActor):
                         f"{i}frame_Loss/giou": giou_loss.item(),
                         f"{i}frame_Loss/l1": l1_loss.item(),
                         f"{i}frame_Loss/location": location_loss.item(),
+                        f"{i}frame_Loss/motion": motion_loss.item(),
                         f"{i}frame_IoU": mean_iou.item()}
                     
                 total_status.update(status)

@@ -48,6 +48,8 @@ class ODTrack(BaseTracker):
         self.z_dict1 = {}
 
     def initialize(self, image, info: dict):
+        if self.cfg.MODEL.MOTION.ENABLE:
+            self.network.reset_motion_history()
         # forward the template once
         z_patch_arr, resize_factor, z_amask_arr = sample_target(image, info['init_bbox'], self.params.template_factor,
                                                     output_sz=self.params.template_size)
