@@ -46,6 +46,10 @@ class ODTrack(BaseTracker):
         # for save boxes from all queries
         self.save_all_boxes = params.save_all_boxes
         self.z_dict1 = {}
+        
+        # MODIFICATION START: For motion model state
+        self.last_template_frame_id = 0
+        # MODIFICATION END
 
     def initialize(self, image, info: dict):
         if self.cfg.MODEL.MOTION.ENABLE:
@@ -68,6 +72,10 @@ class ODTrack(BaseTracker):
         # save states
         self.state = info['init_bbox']
         self.frame_id = 0
+        # MODIFICATION START: Reset frame counter for time gap
+        self.last_template_frame_id = 0
+        # MODIFICATION END
+        
         if self.save_all_boxes:
             '''save all predicted boxes'''
             all_boxes_save = info['init_bbox'] * self.cfg.MODEL.NUM_OBJECT_QUERIES
@@ -90,8 +98,19 @@ class ODTrack(BaseTracker):
             template_list, box_mask_z = self.select_memory_frames()
         # --------- select memory frames ---------
 
+        # MODIFICATION START: Calculate time gap for inference
+        time_gaps_tensor = None
+        if self.cfg.MODEL.MOTION.ENABLE and self.cfg.MODEL.MOTION.USE_TIME_AWARENESS:
+            # During inference, the time gap is always 1 frame.
+            time_gap = self.frame_id - self.last_template_frame_id
+            # Model expects shape (B, num_search). During inference, B=1, num_search=1.
+            time_gaps_tensor = torch.tensor([[time_gap]], device=search.tensors.device)
+        # MODIFICATION END
+
         with torch.no_grad():
-            out_dict = self.network.forward(template=template_list, search=[search.tensors], ce_template_mask=box_mask_z)
+            # MODIFICATION START: Pass time_gaps to the network
+            out_dict = self.network.forward(template=template_list, search=[search.tensors], ce_template_mask=box_mask_z, time_gaps=time_gaps_tensor)
+            # MODIFICATION END
 
         if isinstance(out_dict, list):
             out_dict = out_dict[-1]
@@ -122,7 +141,10 @@ class ODTrack(BaseTracker):
         if 'pred_iou' in out_dict.keys():      # use IoU Head
             pred_iou = out_dict['pred_iou'].squeeze(-1)
             self.memory_ious.append(pred_iou)
-        # --------- save memory frames and masks ---------
+            
+        # MODIFICATION START: Update the last template frame id
+        self.last_template_frame_id = self.frame_id
+        # MODIFICATION END
         
         # for debug
         if self.debug:

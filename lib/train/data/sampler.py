@@ -161,12 +161,23 @@ class TrackingSampler(torch.utils.data.Dataset):
                 template_masks = template_anno['mask'] if 'mask' in template_anno else [torch.zeros((H, W))] * self.num_template_frames
                 search_masks = search_anno['mask'] if 'mask' in search_anno else [torch.zeros((H, W))] * self.num_search_frames
 
+                # MODIFICATION START
+                if is_video_dataset:
+                    time_gaps = [sf_id - template_frame_ids[-1] for sf_id in search_frame_ids]
+                else:
+                    # For image datasets, time gap is 0
+                    time_gaps = [0] * self.num_search_frames
+                # MODIFICATION END
+
                 data = TensorDict({'template_images': template_frames,
                                 'template_anno': template_anno['bbox'],
                                 'template_masks': template_masks,
                                 'search_images': search_frames,  # ori image
                                 'search_anno': search_anno['bbox'],
                                 'search_masks': search_masks,
+                                # MODIFICATION START
+                                'time_gaps': time_gaps,
+                                # MODIFICATION END
                                 'dataset': dataset.get_name(),
                                 'test_class': meta_obj_test.get('object_class_name'),
                                 'exp_str': meta_obj_train.get('exp_str') if 'exp_str' in meta_obj_train else None,
@@ -246,12 +257,23 @@ class TrackingSampler(torch.utils.data.Dataset):
                     search_masks = search_anno['mask'] if 'mask' in search_anno else [torch.zeros(
                         (H, W))] * self.num_search_frames
 
+                # MODIFICATION START
+                # Note: Time gap is not strictly needed for classification but we add it for consistency
+                if is_video_dataset:
+                    time_gaps = [sf_id - template_frame_ids[-1] for sf_id in search_frame_ids]
+                else:
+                    time_gaps = [0] * self.num_search_frames
+                # MODIFICATION END
+
                 data = TensorDict({'template_images': template_frames,
                                    'template_anno': template_anno['bbox'],
                                    'template_masks': template_masks,
                                    'search_images': search_frames,
                                    'search_anno': search_anno['bbox'],
                                    'search_masks': search_masks,
+                                   # MODIFICATION START
+                                   'time_gaps': time_gaps,
+                                   # MODIFICATION END
                                    'dataset': dataset.get_name(),
                                    'test_class': meta_obj_test.get('object_class_name')})
 

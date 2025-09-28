@@ -5,8 +5,10 @@ import torch
 from lib.utils.merge import merge_template_search
 from ...utils.heapmap_utils import generate_heatmap
 from ...utils.ce_utils import generate_mask_cond, adjust_keep_rate
-from lib.models.odtrack.motion_head import gaussian_nll_loss # MODIFICATION
-from lib.utils.box_ops import box_xywh_to_cxcywh # MODIFICATION
+# MODIFICATION START
+from lib.models.odtrack.motion_head import gaussian_nll_loss
+from lib.utils.box_ops import box_xywh_to_cxcywh
+# MODIFICATION END
 
 
 class ODTrackActor(BaseActor):
@@ -50,9 +52,10 @@ class ODTrackActor(BaseActor):
             # search_att = data['search_att'][0].view(-1, *data['search_att'].shape[2:])  # (batch, 320, 320)
             search_list.append(search_img_i)
             
-        box_mask_z = []
+        box_mask_z = None # MODIFIED
         ce_keep_rate = None
         if self.cfg.MODEL.BACKBONE.CE_LOC:
+            box_mask_z = [] # MODIFIED
             for i in range(self.settings.num_template):
                 box_mask_z.append(generate_mask_cond(self.cfg, template_list[i].shape[0], template_list[i].device,
                                                     data['template_anno'][i]))
@@ -65,24 +68,44 @@ class ODTrackActor(BaseActor):
                                                 ITERS_PER_EPOCH=1,
                                                 base_keep_rate=self.cfg.MODEL.BACKBONE.CE_KEEP_RATIO[0])
 
-        # if len(template_list) == 1:
-        #     template_list = template_list[0]
+        # MODIFICATION START
+        time_gaps = None
+        if 'time_gaps' in data and data['time_gaps'] is not None:
+            # The dataloader collates the list of time gaps into a list of tensors.
+            # Each tensor has shape (B,). We stack them to get (B, num_search_frames).
+            if isinstance(data['time_gaps'], list):
+                time_gaps = torch.stack(data['time_gaps'], dim=1)
+            else: # Already a tensor
+                time_gaps = data['time_gaps']
 
         out_dict = self.net(template=template_list,
                             search=search_list,
                             gt_bboxes_xywh=data['search_anno'],
+                            time_gaps=time_gaps,
                             ce_template_mask=box_mask_z,
                             ce_keep_rate=ce_keep_rate,
                             return_last_attn=False)
+        # MODIFICATION END
 
         return out_dict
 
     def compute_losses(self, pred_dict, gt_dict, return_status=True):
         # currently only support the type of pred_dict is list
         assert isinstance(pred_dict, list)
-        loss_dict = {}
+        
+        # MODIFICATION START
+        # The dataloader collates the list of time gaps into a list of tensors.
+        # We need to stack them here as well for the loss calculation.
+        time_gaps_tensor = None
+        if 'time_gaps' in gt_dict and gt_dict['time_gaps'] is not None:
+            if isinstance(gt_dict['time_gaps'], list):
+                time_gaps_tensor = torch.stack(gt_dict['time_gaps'], dim=1)
+            else:
+                time_gaps_tensor = gt_dict['time_gaps']
+        # MODIFICATION END
+        
+        total_loss = torch.tensor(0.0, device=gt_dict['search_anno'][0].device)
         total_status = {}
-        total_loss = torch.tensor(0., dtype=torch.float).cuda() # 定义 0 tensor，并指定GPU设备
         
         # generate gt gaussian map
         gt_gaussian_maps_list = generate_heatmap(gt_dict['search_anno'], self.cfg.DATA.SEARCH.SIZE, self.cfg.MODEL.BACKBONE.STRIDE)
@@ -91,6 +114,7 @@ class ODTrackActor(BaseActor):
         gt_boxes_cxcywh = [box_xywh_to_cxcywh(anno) for anno in gt_dict['search_anno']]
         # MODIFICATION END
         for i in range(len(pred_dict)):
+            loss_dict = {}
             # get GT
             gt_bbox = gt_dict['search_anno'][i]  # (Ns, batch, 4) (x1,y1,w,h) -> (batch, 4)
             gt_gaussian_maps = gt_gaussian_maps_list[i].unsqueeze(1)
@@ -131,8 +155,21 @@ class ODTrackActor(BaseActor):
                     gt_delta = gt_boxes_cxcywh[i] - gt_boxes_cxcywh[i-1]
                     pred_delta = pred_dict[i]['motion_pred_delta']
                     pred_log_sigma = pred_dict[i]['motion_pred_log_sigma']
-                    motion_loss = gaussian_nll_loss(gt_delta, pred_delta, pred_log_sigma)
-            
+                    
+                    unweighted_motion_loss = gaussian_nll_loss(gt_delta, pred_delta, pred_log_sigma)
+
+                    if self.cfg.TRAIN.USE_TIME_AWARE_LOSS and time_gaps_tensor is not None:
+                        time_gaps_current = time_gaps_tensor[:, i]
+                        decay_rate = self.cfg.TRAIN.MOTION_LOSS_DECAY_RATE
+                        with torch.no_grad():
+                            # Loss weight is smaller for larger gaps
+                            loss_weights = torch.exp(-decay_rate * (time_gaps_current.float() - 1.0))
+                        
+                        # Apply the average weight for this batch to the loss
+                        motion_loss = unweighted_motion_loss * loss_weights.mean()
+                    else:
+                        motion_loss = unweighted_motion_loss
+
             loss_dict['motion'] = motion_loss
             # MODIFICATION END    
             # weighted sum
@@ -145,12 +182,11 @@ class ODTrackActor(BaseActor):
                 
                 mean_iou = iou.detach().mean()
                 status = {f"{i}frame_Loss/total": loss.item(),
-                        f"{i}frame_Loss/giou": giou_loss.item(),
-                        f"{i}frame_Loss/l1": l1_loss.item(),
-                        f"{i}frame_Loss/location": location_loss.item(),
-                        f"{i}frame_Loss/motion": motion_loss.item(),
-                        f"{i}frame_IoU": mean_iou.item()}
-                    
+                          f"{i}frame_Loss/giou": giou_loss.item(),
+                          f"{i}frame_Loss/l1": l1_loss.item(),
+                          f"{i}frame_Loss/location": location_loss.item(),
+                          f"{i}frame_Loss/motion": motion_loss.item(),
+                          f"{i}frame_IoU": mean_iou.item()}
                 total_status.update(status)
 
         if return_status:
