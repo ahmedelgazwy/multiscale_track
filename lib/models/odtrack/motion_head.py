@@ -143,12 +143,77 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class ResidualBlock(nn.Module):
+    """A simple residual block for an MLP."""
+    def __init__(self, dim):
+        super().__init__()
+        self.layer1 = nn.Linear(dim, dim)
+        self.norm = nn.LayerNorm(dim)
+        self.activation = nn.ReLU()
+        self.layer2 = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        identity = x
+        out = self.layer2(self.activation(self.norm(self.layer1(x))))
+        out = out + identity # The residual connection
+        return out
+    
+class StateSpaceHeadMLP(nn.Module):
+    """ The original MLP-based motion head. """
+    def __init__(self, history_len=3, hidden_dim=256,num_blocks=4,
+                 use_appearance=True, appearance_dim=768, 
+                 use_time=True, time_embedding_dim=128, **kwargs):
+        """
+        Initializes the motion head. Ignores unused kwargs for compatibility.
+        """
+        super().__init__()
+        self.use_appearance = use_appearance
+        self.use_time = use_time
+        
+        input_dim = history_len * 4
+        if self.use_appearance:
+            input_dim += appearance_dim
+        if self.use_time:
+            input_dim += time_embedding_dim
+
+        # An initial layer to project the diverse inputs to our working dimension
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        
+        # A series of residual blocks
+        self.blocks = nn.Sequential(*[ResidualBlock(hidden_dim) for _ in range(num_blocks)])    
+        output_dim = 4 + 2
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+
+
+    def forward(self, history_boxes_flat: torch.Tensor,
+                appearance_feature: torch.Tensor = None, 
+                time_gap_embedding: torch.Tensor = None):
+        """
+        Args:
+            history_boxes_flat (torch.Tensor): A FLATTENED tensor of historical bounding boxes.
+                                               Shape (B, history_len * 4).
+        """
+        inputs = [history_boxes_flat]
+        if self.use_appearance and appearance_feature is not None:
+            inputs.append(appearance_feature)
+        if self.use_time and time_gap_embedding is not None:
+            inputs.append(time_gap_embedding)
+        
+        combined_input = torch.cat(inputs, dim=1)
+        x = self.input_proj(combined_input)
+        x = self.blocks(x)
+        pred = self.output_proj(x)
+      
+        
+        delta_pred = pred[:, :4]
+        log_sigma_pred = pred[:, 4:]
+        return delta_pred, log_sigma_pred
 # MODIFICATION START
-class StateSpaceHead(nn.Module):
+class StateSpaceHeadGRU(nn.Module):
     """ A GRU-based sequence model to predict motion delta and uncertainty. """
     def __init__(self, hidden_dim=128, rnn_dim=256, num_rnn_layers=2,
                  use_appearance=True, appearance_dim=768, 
-                 use_time=True, time_embedding_dim=128):
+                 use_time=True, time_embedding_dim=128, **kwargs):
         """
         Initializes the motion head.
         Args:
@@ -171,7 +236,7 @@ class StateSpaceHead(nn.Module):
             num_layers=num_rnn_layers,
             batch_first=True        # Crucial for (B, seq_len, features) input
         )
-
+        self.norm = nn.LayerNorm(rnn_dim)
         # Calculate the size of the combined feature vector after the GRU
         combined_dim = rnn_dim
         if self.use_appearance:
@@ -212,7 +277,7 @@ class StateSpaceHead(nn.Module):
         # final_hidden_state has shape (num_rnn_layers, B, rnn_dim).
         # We take the hidden state from the last layer.
         motion_summary = final_hidden_state[-1] # Shape becomes (B, rnn_dim)
-
+        motion_summary = self.norm(motion_summary)
         # 2. Prepare for feature fusion
         inputs = [motion_summary]
         if self.use_appearance and appearance_feature is not None:

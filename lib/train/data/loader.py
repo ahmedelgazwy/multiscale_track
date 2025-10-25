@@ -2,10 +2,18 @@ import torch
 import torch.utils.data.dataloader
 import importlib
 import collections
+# from torch._six import string_classes
 from lib.utils import TensorDict, TensorList
-
-int_classes = int
-string_classes = (str, bytes)
+# ---- START OF MODIFICATION ----
+# Import the ABCs from the correct submodule for modern Python versions
+import collections.abc
+# ---- END of MODIFICATION ----
+if float(torch.__version__[:3]) >= 1.9 or len('.'.join((torch.__version__).split('.')[0:2])) > 3:
+    int_classes = int
+else:
+    # from torch._six import int_classes
+    int_classes = (int, np.integer)
+string_classes = (str, bytes) 
 
 def _check_use_shared_memory():
     if hasattr(torch.utils.data.dataloader, '_use_shared_memory'):
@@ -53,12 +61,12 @@ def ltr_collate(batch):
         return batch
     elif isinstance(batch[0], TensorDict):
         return TensorDict({key: ltr_collate([d[key] for d in batch]) for key in batch[0]})
-    elif isinstance(batch[0], collections.Mapping):
+    elif isinstance(batch[0], collections.abc.Mapping):
         return {key: ltr_collate([d[key] for d in batch]) for key in batch[0]}
     elif isinstance(batch[0], TensorList):
         transposed = zip(*batch)
         return TensorList([ltr_collate(samples) for samples in transposed])
-    elif isinstance(batch[0], collections.Sequence):
+    elif isinstance(batch[0], collections.abc.Sequence):
         transposed = zip(*batch)
         return [ltr_collate(samples) for samples in transposed]
     elif batch[0] is None:
@@ -78,7 +86,7 @@ def ltr_collate_stack1(batch):
             # If we're in a background process, concatenate directly into a
             # shared memory tensor to avoid an extra copy
             numel = sum([x.numel() for x in batch])
-            storage = batch[1].untyped_storage()._new_shared(numel)
+            storage = batch[0].untyped_storage()._new_shared(numel)
             out = batch[0].new(storage).resize_(0)
         return torch.stack(batch, 1, out=out.clone())
         # if batch[0].dim() < 4:
@@ -104,12 +112,12 @@ def ltr_collate_stack1(batch):
         return batch
     elif isinstance(batch[0], TensorDict):
         return TensorDict({key: ltr_collate_stack1([d[key] for d in batch]) for key in batch[0]})
-    elif isinstance(batch[0], collections.Mapping):
+    elif isinstance(batch[0], collections.abc.Mapping):
         return {key: ltr_collate_stack1([d[key] for d in batch]) for key in batch[0]}
     elif isinstance(batch[0], TensorList):
         transposed = zip(*batch)
         return TensorList([ltr_collate_stack1(samples) for samples in transposed])
-    elif isinstance(batch[0], collections.Sequence):
+    elif isinstance(batch[0], collections.abc.Sequence):
         transposed = zip(*batch)
         return [ltr_collate_stack1(samples) for samples in transposed]
     elif batch[0] is None:

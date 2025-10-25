@@ -312,7 +312,7 @@ from lib.models.odtrack.vit import vit_base_patch16_224, vit_large_patch16_224
 from lib.models.odtrack.vit_ce import vit_large_patch16_224_ce, vit_base_patch16_224_ce
 from lib.utils.box_ops import box_xyxy_to_cxcywh, box_xywh_to_cxcywh
 # MODIFICATION START
-from .motion_head import StateSpaceHead, create_gaussian_attention_bias
+from .motion_head import StateSpaceHeadMLP, StateSpaceHeadGRU, create_gaussian_attention_bias
 # MODIFICATION END
 
 # MODIFICATION START
@@ -367,20 +367,29 @@ class ODTrack(nn.Module):
         self.track_query = None
         self.token_len = cfg.MODEL.BACKBONE.TOKEN_LEN # MODIFIED
 
-        # MODIFICATION START
+# MODIFICATION START
         self.motion_head_enable = cfg.MODEL.MOTION.ENABLE
         if self.motion_head_enable:
             self.history_len = cfg.MODEL.MOTION.HISTORY_LEN
-            self.motion_head = StateSpaceHead(
-                hidden_dim=cfg.MODEL.MOTION.HEAD_HIDDEN_DIM,
-                rnn_dim=cfg.MODEL.MOTION.RNN_DIM,
-                num_rnn_layers=cfg.MODEL.MOTION.RNN_LAYERS,
-                use_appearance=cfg.MODEL.MOTION.USE_APPEARANCE,
-                appearance_dim=cfg.MODEL.MOTION.APPEARANCE_DIM,
-                use_time=cfg.MODEL.MOTION.USE_TIME_AWARENESS,
-                time_embedding_dim=cfg.MODEL.MOTION.TIME_EMBEDDING_DIM
-            )
-            # We need to store previous data to feed to the motion model
+            
+            motion_head_params = {
+                'history_len': self.history_len,
+                'hidden_dim': cfg.MODEL.MOTION.HEAD_HIDDEN_DIM,
+                'rnn_dim': cfg.MODEL.MOTION.RNN_DIM,
+                'num_rnn_layers': cfg.MODEL.MOTION.RNN_LAYERS,
+                'use_appearance': cfg.MODEL.MOTION.USE_APPEARANCE,
+                'appearance_dim': cfg.MODEL.MOTION.APPEARANCE_DIM,
+                'use_time': cfg.MODEL.MOTION.USE_TIME_AWARENESS,
+                'time_embedding_dim': cfg.MODEL.MOTION.TIME_EMBEDDING_DIM
+            }
+            
+            if cfg.MODEL.MOTION.HEAD_TYPE == 'GRU':
+                self.motion_head = StateSpaceHeadGRU(**motion_head_params)
+            elif cfg.MODEL.MOTION.HEAD_TYPE == 'MLP':
+                self.motion_head = StateSpaceHeadMLP(**motion_head_params)
+            else:
+                raise ValueError(f"Unknown motion head type: {cfg.MODEL.MOTION.HEAD_TYPE}")
+
             self.history_boxes_cxcywh = collections.deque(maxlen=self.history_len)
             self.prev_enc_opt = None
             if cfg.MODEL.MOTION.USE_TIME_AWARENESS:
@@ -448,9 +457,15 @@ class ODTrack(nn.Module):
                 if time_gap_embeddings is not None:
                     current_time_embedding = time_gap_embeddings[:, i] # Get embedding for the i-th search frame
 
-                # 4. Predict motion
+                # MODIFICATION START: Prepare input based on head type
+                if self.cfg.MODEL.MOTION.HEAD_TYPE == 'GRU':
+                    motion_input = history_tensor
+                elif self.cfg.MODEL.MOTION.HEAD_TYPE == 'MLP':
+                    motion_input = history_tensor.flatten(start_dim=1)
+                else:
+                    motion_input = None # Should not happen
                 motion_pred_delta, motion_pred_log_sigma = self.motion_head(
-                    history_tensor, appearance_feature, current_time_embedding # PASS UN-FLATTENED TENSOR
+                    motion_input, appearance_feature, current_time_embedding
                 )
 
                 # 5. Create attention bias map

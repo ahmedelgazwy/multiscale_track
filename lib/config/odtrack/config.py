@@ -40,10 +40,13 @@ cfg.MODEL.HEAD.NUM_CHANNELS = 256
 # MODEL.MOTION
 cfg.MODEL.MOTION = edict()
 cfg.MODEL.MOTION.ENABLE = True
+cfg.MODEL.MOTION.HEAD_TYPE = 'GRU'  # Options: 'MLP', 'GRU'
 cfg.MODEL.MOTION.HEAD_HIDDEN_DIM = 128
 cfg.MODEL.MOTION.HISTORY_LEN = 3
+# GRU-specific params
 cfg.MODEL.MOTION.RNN_DIM = 256
 cfg.MODEL.MOTION.RNN_LAYERS = 2
+# Feature params
 cfg.MODEL.MOTION.USE_APPEARANCE = True
 cfg.MODEL.MOTION.APPEARANCE_DIM = 768  # Should match backbone embed_dim
 cfg.MODEL.MOTION.APPEARANCE_POOLING = 'mean'  # 'mean' or 'max'
